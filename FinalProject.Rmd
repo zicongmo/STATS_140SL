@@ -1,0 +1,181 @@
+---
+title: "Final Project"
+author: "Zicong Mo"
+date: "2/27/2020"
+output: html_document
+---
+
+```{r}
+########## LIBRARIES ##########
+library(dplyr) # data preprocessing
+library(glmnet) # ridge, lasso 
+library(caret) # train
+library(xgboost)
+
+########## HELPER FUNCTIONS ##########
+# For each element of p, return the dollar amount represented by the element
+from_dollar = function(p) {
+    return(as.numeric(gsub('[$,]', '', p)))
+}
+
+# For each element of b, return TRUE if b is exactly 't'
+from_boolean = function(b) {
+    return(b == "t")
+}
+
+# For each element of s, return the number of elements of s if s were casted to list
+# Bug: Empty elements are still counted, meaning that "{}" returns 1 and "{,}" returns 2
+# This is really jank, but too lazy to fix this
+get_num_elems = function(s) {
+    return(unlist(lapply(strsplit(as.character(s), ","), length)))
+}
+
+########## DATA READ AND CLEANING ##########
+# Read in all data
+airbnb_all <- read.csv("listings.csv")
+
+apartment_all <- airbnb_all
+
+# Select all columns that could potentially be useful in a bad linear regression
+# In particular, exclude:
+# 1. identifying information (e.g. id) We'll keep listing_url to look up potential outliers later
+# 2. host inputted information (e.g. name, summary, space, description)
+# 3. columns that duplicate information (e.g. market, latitude, longitude, neighborhood)
+
+# Potential predictors to add: 
+# host_neighbourhood == neighbourhood_cleansed
+# Amount of time that host has been a host (cleaned host_since)
+# NLP information about the host inputted columns
+apartment_reduced <- apartment_all %>% select(listing_url,
+                                              # comment/uncomment these lines depending on filter
+                                              property_type,
+                                              neighbourhood_cleansed,
+                                              host_response_time,
+                                              host_response_rate,
+                                              host_acceptance_rate,
+                                              host_is_superhost,
+                                              host_listings_count,
+                                              host_verifications,
+                                              host_has_profile_pic,
+                                              host_identity_verified,
+                                              is_location_exact,
+                                              room_type,
+                                              accommodates,
+                                              bathrooms,
+                                              bedrooms,
+                                              beds,
+                                              bed_type,
+                                              amenities,
+                                              square_feet,
+                                              price,
+                                              availability_30,
+                                              availability_60,
+                                              availability_90,
+                                              availability_365,
+                                              number_of_reviews,
+                                              review_scores_rating,
+                                              review_scores_accuracy,
+                                              review_scores_cleanliness,
+                                              review_scores_checkin,
+                                              review_scores_communication,
+                                              review_scores_location,
+                                              review_scores_value,
+                                              requires_license,
+                                              instant_bookable,
+                                              is_business_travel_ready,
+                                              cancellation_policy,
+                                              require_guest_profile_picture,
+                                              require_guest_phone_verification,
+                                              reviews_per_month)
+
+# There are 3511 N/A's (not NA) for host_response_time and host_response_rate, but these are the same 3511 rows.
+# host_verifications and amenities should probably be parsed to represent the number of host verifications and amenities respectively. An alternative is to bag of words the elements, but too much work
+# Of the ~3300 NA's in the review* columns, 3368 of them are shared between all of them
+# The 180 empty values for host_is_superhost, host_has_profile_pic, host_identity_verified are the same as the 180 NA's in host_listings_count
+# summary(apartment_reduced)
+
+# Reduce any fields that are basically all the same value or too many NA
+# I'm choosing to ignore the host_response_time + review* variables
+apartment_cleaned <- apartment_reduced %>% select(-host_acceptance_rate, # All empty or N/A
+                                                  -host_response_time, # see above
+                                                  -host_response_rate, # see above
+                                                  -square_feet, # probably useful, but a lot of NA)
+                                                  -review_scores_rating,
+                                                  -review_scores_accuracy,
+                                                  -review_scores_cleanliness,
+                                                  -review_scores_checkin,
+                                                  -review_scores_communication,
+                                                  -review_scores_location,
+                                                  -review_scores_value,
+                                                  -reviews_per_month,
+                                                  -is_business_travel_ready) # all F)
+
+# summary(apartment_cleaned)
+
+# Perform the following transformations/casts: (original name : description => new name)
+# host_verifications: cast the string to the number of verifications => num_verifications
+# amenities: cast the string to the number of amenities => num_amenities
+# price: cast the string to the dollar amount it represents => price
+# Remove the host_verifications and amenities column, then filter for price > 0 (this is clearly bad data)
+# price: natural log of the dollar amount => log_price
+apartment_casted <- apartment_cleaned %>% mutate(num_verifications = get_num_elems(host_verifications),
+                                                 num_amenities = get_num_elems(amenities),
+                                                 price = from_dollar(price)) %>%
+                                          select(-host_verifications, -amenities) %>%
+                                          filter(price > 0) %>% 
+                                          mutate(log_price = log(price))
+
+# Looking at the prices, some people are clearly delusional
+# https://www.airbnb.com/rooms/21801886
+# However, manually going through the data to remove these outliers is also super annoying, so we just won't do it :)
+# https://www.airbnb.com/rooms/24858061 has 110 amenities, but is no longer actively listed
+# A lot of people with lots of amenities are just double listing them (e.g. TV, "Cable TV") or on something ("Host greets you", "Well-lit path to entrance")
+# Again, manually going through is difficult, so we'll just leave the data but keep this fact in mind
+# Finally, some hosts are waaay more experienced than other ones (some have >1000 listings in multiple states)
+# It's difficult to find a basis to exclude them, so again we just leave the data
+# One way to potentially get rid of dumb people is to filter by availability_365 < 365
+# Rows with 365 availability have never been rented before, which can be related to the fact that their hosts are way overvaluing their properties
+# summary(apartment_casted)
+
+# Omit all NA's. This isn't necessary for lm, but potentially necessary for other models if we want to try other models
+# Remove all airbnbs that have never been rented before
+# Remove listing_url, price for model fitting convenience
+apartment <- apartment_casted %>% filter(availability_365 < 365) %>% 
+                                  na.omit() %>% select(-listing_url, -price)
+
+# This dataset has 37172 rows, compared to the ~40000 of the entire dataset
+# summary(apartment)
+
+########## FITTING THE MODEL ##########
+# Linear regression, just initially see which values are significant (there gon be a lot)
+model <- lm(log_price ~ ., data = apartment)
+summary(model)
+
+# Convert onehot 
+x <- model.matrix(log_price ~ ., data = apartment)
+y <- apartment$log_price
+
+## For variable importance, we'll fit both ridge and lasso regression, cv to find best lambda
+# idk how to interpret these, since our variables aren't scaled
+
+# Ridge
+# To be honest, I don't really remember what this code does
+cv_fit_ridge <- cv.glmnet(x, y, alpha = 0)
+opt_lambda <- cv_fit_ridge$lambda.min
+model_ridge <- glmnet(x, y, alpha = 0, lambda = opt_lambda)
+predict(model_ridge, s = opt_lambda, type = "coefficients")
+
+# Lasso
+# Lasso sets irrelevant variables to 0 more aggressively
+cv_fit_lasso <- cv.glmnet(x, y, alpha = 1)
+opt_lambda_lasso <- cv_fit_lasso$lambda.min
+model_lasso <- glmnet(x, y, alpha =1, lambda = opt_lambda_lasso)
+predict(model_lasso, s = opt_lambda_lasso, type = "coefficients")
+
+# xgboost, unoptimized
+xgb <- xgboost(data = x, label = y, nrounds = 100)
+mat <- xgb.importance(feature_names = colnames(x), model = xgb)
+xgb.plot.importance(importance_matrix = mat[1:50])
+
+# also try random forest??
+```
