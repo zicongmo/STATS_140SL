@@ -11,6 +11,7 @@ library(dplyr) # data preprocessing
 library(glmnet) # ridge, lasso 
 library(caret) # train
 library(xgboost)
+library(randomForest)
 
 ########## HELPER FUNCTIONS ##########
 # For each element of p, return the dollar amount represented by the element
@@ -147,13 +148,16 @@ apartment <- apartment_casted %>% filter(availability_365 < 365) %>%
 # summary(apartment)
 
 ########## FITTING THE MODEL ##########
-# Linear regression, just initially see which values are significant (there gon be a lot)
-model <- lm(log_price ~ ., data = apartment)
-summary(model)
-
 # Convert onehot 
 x <- model.matrix(log_price ~ ., data = apartment)
 y <- apartment$log_price
+
+# Baseline MSE, try predicting the average log price
+mean((mean(y) - y)^2)
+
+# Linear regression, just initially see which values are significant (there gon be a lot)
+linear_model <- lm(log_price ~ ., data = apartment)
+mean((linear_model$fitted.values - y)^2)
 
 ## For variable importance, we'll fit both ridge and lasso regression, cv to find best lambda
 # idk how to interpret these, since our variables aren't scaled
@@ -163,19 +167,22 @@ y <- apartment$log_price
 cv_fit_ridge <- cv.glmnet(x, y, alpha = 0)
 opt_lambda <- cv_fit_ridge$lambda.min
 model_ridge <- glmnet(x, y, alpha = 0, lambda = opt_lambda)
-predict(model_ridge, s = opt_lambda, type = "coefficients")
+mean((predict(model_ridge, s = opt_lambda, newx = x) - y)^2)
 
 # Lasso
 # Lasso sets irrelevant variables to 0 more aggressively
 cv_fit_lasso <- cv.glmnet(x, y, alpha = 1)
 opt_lambda_lasso <- cv_fit_lasso$lambda.min
 model_lasso <- glmnet(x, y, alpha =1, lambda = opt_lambda_lasso)
-predict(model_lasso, s = opt_lambda_lasso, type = "coefficients")
+mean((predict(model_lasso, s = opt_lambda_lasso, newx = x) - y)^2)
 
 # xgboost, unoptimized
 xgb <- xgboost(data = x, label = y, nrounds = 100)
 mat <- xgb.importance(feature_names = colnames(x), model = xgb)
 xgb.plot.importance(importance_matrix = mat[1:50])
+mean((predict(xgb, newdata = x) - y)^2)
 
-# also try random forest??
+# random forest
+
+# PCR
 ```
