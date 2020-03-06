@@ -144,6 +144,23 @@ apartment_casted <- apartment_cleaned %>% mutate(num_verifications = get_num_ele
 apartment <- apartment_casted %>% filter(availability_365 < 365) %>% 
                                   na.omit() %>% select(-listing_url, -price)
 
+set.seed(12345)
+n <- nrow(apartment)
+train_indices <- sample(1:n, n * 0.8) 
+
+x <- model.matrix(log_price ~ ., data = apartment)
+y <- apartment$log_price
+
+# Use these if you need binary data for factors, xgboost, ridge, etc.
+train_x <- x[train_indices,]
+train_y <- y[train_indices]
+test_x <- x[-train_indices,]
+test_y <- y[-train_indices]
+
+# Use these if you're okay with binary data
+train <- apartment[train_indices,] # 29737 elements
+test <- apartment[-train_indices,] # 7435 elements
+
 ########## FITTING THE MODEL ##########
 # Convert onehot 
 x <- model.matrix(log_price ~ ., data = apartment)
