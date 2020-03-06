@@ -144,9 +144,6 @@ apartment_casted <- apartment_cleaned %>% mutate(num_verifications = get_num_ele
 apartment <- apartment_casted %>% filter(availability_365 < 365) %>% 
                                   na.omit() %>% select(-listing_url, -price)
 
-# This dataset has 37172 rows, compared to the ~40000 of the entire dataset
-# summary(apartment)
-
 ########## FITTING THE MODEL ##########
 # Convert onehot 
 x <- model.matrix(log_price ~ ., data = apartment)
